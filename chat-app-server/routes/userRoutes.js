@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { User } = require('../models/User');
+const https = require('https');
 
 // Get all users
 router.get('/users', async (req, res) => {
@@ -57,6 +58,51 @@ router.post('/login', async (req, res) => {
     res.json({ success: true, username: user.username });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Login failed' });
+  }
+});
+
+// Get ICE servers from Xirsys
+router.get('/ice-servers', async (req, res) => {
+  try {
+    const options = {
+      host: "global.xirsys.net",
+      path: "/_turn/MyFirstApp",
+      method: "PUT",
+      headers: {
+        "Authorization": "Basic " + Buffer.from(process.env.XIRSYS_CREDENTIALS).toString("base64"),
+        "Content-Type": "application/json",
+        "Content-Length": JSON.stringify({ format: "urls" }).length
+      }
+    };
+
+    const httpreq = https.request(options, function(httpres) {
+      let str = "";
+      httpres.on("data", function(data){ str += data; });
+      httpres.on("error", function(e){ 
+        console.error("Xirsys error:", e);
+        res.status(500).json({ error: "Failed to fetch ICE servers" });
+      });
+      httpres.on("end", function(){ 
+        try {
+          const iceServers = JSON.parse(str);
+          res.json(iceServers);
+        } catch (e) {
+          console.error("Failed to parse ICE servers:", e);
+          res.status(500).json({ error: "Failed to parse ICE servers" });
+        }
+      });
+    });
+
+    httpreq.on("error", function(e){ 
+      console.error("Xirsys request error:", e);
+      res.status(500).json({ error: "Failed to connect to TURN server" });
+    });
+
+    httpreq.write(JSON.stringify({ format: "urls" }));
+    httpreq.end();
+  } catch (error) {
+    console.error("ICE servers error:", error);
+    res.status(500).json({ error: "Failed to get ICE servers" });
   }
 });
 
