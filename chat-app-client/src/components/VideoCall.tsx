@@ -89,10 +89,13 @@ const VideoCall: React.FC<VideoCallProps> = ({
       try {
         const response = await fetch('/api/ice-servers');
         const data = await response.json();
-        if (data.v) {
-          setIceServers(data.v.iceServers);
+        console.log('ICE servers response:', data);
+        
+        if (data.iceServers && Array.isArray(data.iceServers)) {
+          console.log('Using ICE servers:', data.iceServers);
+          setIceServers(data.iceServers);
         } else {
-          console.error('Invalid ICE servers response:', data);
+          console.error('Invalid ICE servers format:', data);
           // Fallback to default STUN servers
           setIceServers([
             { urls: 'stun:stun.l.google.com:19302' },
