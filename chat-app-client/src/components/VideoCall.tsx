@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import styled from 'styled-components';
 import { motion, AnimatePresence } from 'framer-motion';
 import { FiPhoneOff, FiMic, FiMicOff, FiVideo, FiVideoOff } from 'react-icons/fi';
@@ -34,54 +34,24 @@ const getIceServers = async () => {
         'Authorization': 'Basic ' + btoa('kartik:14120456-ef8f-11ef-9c6d-0242ac150003'),
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
-        format: "urls",
-        timeout: 60
-      })
+      body: JSON.stringify({ format: "urls" })
     });
 
     const data = await response.json();
-    console.log('Raw Xirsys response:', data);
+    console.log('Xirsys response:', data); // Debug log
 
-    let iceServers = [];
-
-    // Handle Xirsys response format
-    if (data && data.v) {
-      // Extract ICE servers directly from the v property
-      const xirsysServers = Array.isArray(data.v.iceServers) ? data.v.iceServers :
-                           Array.isArray(data.v.ice) ? data.v.ice :
-                           Array.isArray(data.v) ? data.v : [];
-      
-      iceServers = xirsysServers.map((server: any) => ({
-        urls: Array.isArray(server.url) ? server.url :
-              Array.isArray(server.urls) ? server.urls :
-              typeof server.url === 'string' ? [server.url] :
-              typeof server.urls === 'string' ? [server.urls] : [],
-        ...(server.username && { username: server.username }),
-        ...(server.credential && { credential: server.credential })
-      })).filter(server => server.urls.length > 0);
-
-      console.log('Processed Xirsys servers:', iceServers);
+    // Check if data has the expected structure
+    if (data && data.v && Array.isArray(data.v.iceServers)) {
+      return data.v.iceServers;
+    } else if (data && Array.isArray(data.iceServers)) {
+      return data.iceServers;
+    } else {
+      console.warn('Unexpected Xirsys response format, using fallback servers');
+      throw new Error('Invalid ICE servers format');
     }
-
-    // Always include fallback STUN servers
-    const fallbackServers = [
-      {
-        urls: [
-          'stun:stun1.l.google.com:19302',
-          'stun:stun2.l.google.com:19302',
-          'stun:stun3.l.google.com:19302',
-          'stun:stun4.l.google.com:19302'
-        ]
-      }
-    ];
-
-    const finalServers = [...iceServers, ...fallbackServers];
-    console.log('Final ICE configuration:', finalServers);
-    return finalServers;
-
   } catch (error) {
     console.error('Error fetching ICE servers:', error);
+    // Return fallback STUN servers
     return [
       {
         urls: [
@@ -107,77 +77,45 @@ const VideoCall: React.FC<VideoCallProps> = ({
   const [isVideoEnabled, setIsVideoEnabled] = useState(true);
   const [iceServers, setIceServers] = useState<RTCIceServer[]>([]);
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'failed'>('connecting');
-  const [isCallEnding, setIsCallEnding] = useState(false);
   
   const myVideo = useRef<HTMLVideoElement>(null);
   const userVideo = useRef<HTMLVideoElement>(null);
   const connectionRef = useRef<any>();
   const streamRef = useRef<MediaStream | null>(null);
 
-  // Complete cleanup function
-  const completeCleanup = useCallback(() => {
-    setIsCallEnding(true);
-    
-    // Clean up peer connection
+  // Complete cleanup function for ALL media resources
+  const completeCleanup = () => {
+    // 1. Destroy peer connection if it exists
     if (connectionRef.current) {
       connectionRef.current.destroy();
       connectionRef.current = null;
     }
 
-    // Clean up media streams
+    // 2. Stop all tracks in the stream and clear stream references
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => {
+      const tracks = streamRef.current.getTracks();
+      tracks.forEach(track => {
         track.stop();
-        console.log(`Track ${track.kind} stopped: ${track.readyState}`);
+        console.log(`Track ${track.kind} stopped:`, track.readyState);
       });
       streamRef.current = null;
     }
 
-    // Clear video elements
-    if (myVideo.current) myVideo.current.srcObject = null;
-    if (userVideo.current) userVideo.current.srcObject = null;
+    // 3. Clear video srcObjects
+    if (myVideo.current && myVideo.current.srcObject) {
+      myVideo.current.srcObject = null;
+    }
+    
+    if (userVideo.current && userVideo.current.srcObject) {
+      userVideo.current.srcObject = null;
+    }
 
+    // 4. Clear state
     setStream(null);
     setCallAccepted(false);
-  }, []);
+  };
 
-  // Set up media stream
-  useEffect(() => {
-    let mounted = true;
-
-    const setupStream = async () => {
-      try {
-        const mediaStream = await navigator.mediaDevices.getUserMedia({ 
-          video: true, 
-          audio: true 
-        });
-
-        if (!mounted) {
-          mediaStream.getTracks().forEach(track => track.stop());
-          return;
-        }
-
-        streamRef.current = mediaStream;
-        setStream(mediaStream);
-        
-        if (myVideo.current) {
-          myVideo.current.srcObject = mediaStream;
-        }
-      } catch (error) {
-        console.error('Error accessing media devices:', error);
-        onClose();
-      }
-    };
-
-    setupStream();
-
-    return () => {
-      mounted = false;
-      completeCleanup();
-    };
-  }, []);
-
-  // Fetch ICE servers
+  // Fetch ICE servers when component mounts
   useEffect(() => {
     const fetchIceServers = async () => {
       const servers = await getIceServers();
@@ -186,9 +124,40 @@ const VideoCall: React.FC<VideoCallProps> = ({
     fetchIceServers();
   }, []);
 
-  // Handle call setup
+  // Set up media stream with proper tracking
   useEffect(() => {
-    if (!stream || !iceServers.length || isCallEnding) return;
+    let mounted = true;
+
+    navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+      .then((mediaStream) => {
+        if (!mounted) {
+          // Component unmounted before promise resolved, clean up the stream
+          mediaStream.getTracks().forEach(track => track.stop());
+          return;
+        }
+        
+        // Store stream in ref for cleanup access
+        streamRef.current = mediaStream;
+        setStream(mediaStream);
+        
+        if (myVideo.current) {
+          myVideo.current.srcObject = mediaStream;
+        }
+      })
+      .catch((error) => {
+        console.error('Error accessing media devices:', error);
+        onClose();
+      });
+
+    // Cleanup function
+    return () => {
+      mounted = false;
+      completeCleanup();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!stream || !iceServers.length) return;
 
     const setupCall = () => {
       if (isReceivingCall && signal) {
@@ -198,14 +167,12 @@ const VideoCall: React.FC<VideoCallProps> = ({
       }
     };
 
-    const timer = setTimeout(setupCall, 1000); // Increased delay for better stability
+    const timer = setTimeout(setupCall, 500);
     return () => clearTimeout(timer);
-  }, [stream, iceServers, isReceivingCall, signal, isCallEnding]);
+  }, [stream, iceServers, isReceivingCall, signal]);
 
   // Handle remote call end
   useEffect(() => {
-    if (!socket) return;
-
     socket.on('endCall', () => {
       completeCleanup();
       onClose();
@@ -214,31 +181,29 @@ const VideoCall: React.FC<VideoCallProps> = ({
     return () => {
       socket.off('endCall');
     };
-  }, [socket, onClose, completeCleanup]);
+  }, [socket, onClose]);
 
-  const createPeerConnection = useCallback((isInitiator: boolean) => {
-    if (!stream || !iceServers.length || isCallEnding) return null;
+  const createPeerConnection = (isInitiator: boolean) => {
+    if (!stream || !iceServers.length) return null;
 
     try {
       const peer = new Peer({
         initiator: isInitiator,
-        trickle: true,
+        trickle: false,
         stream,
         config: {
           iceServers: iceServers,
-          iceTransportPolicy: 'all',
-          iceCandidatePoolSize: 10,
-          bundlePolicy: 'max-bundle',
-          rtcpMuxPolicy: 'require'
+          iceTransportPolicy: 'all'
         }
       });
 
       peer.on('error', (err: Error) => {
         console.error('Peer connection error:', err);
-        if (!isCallEnding) {
+        if (err.toString().includes('ICE connection failed')) {
+          console.log('ICE connection failed - trying to reconnect...');
           setConnectionStatus('failed');
-          onClose();
         }
+        onClose();
       });
 
       peer.on('connect', () => {
@@ -251,21 +216,17 @@ const VideoCall: React.FC<VideoCallProps> = ({
         if (state === 'connected') {
           setConnectionStatus('connected');
         } else if (state === 'failed' || state === 'disconnected' || state === 'closed') {
-          if (!isCallEnding) {
-            setConnectionStatus('failed');
-          }
+          setConnectionStatus('failed');
         }
       });
 
       return peer;
     } catch (error) {
       console.error('Error creating peer:', error);
-      if (!isCallEnding) {
-        setConnectionStatus('failed');
-      }
+      setConnectionStatus('failed');
       return null;
     }
-  }, [stream, iceServers, isCallEnding, onClose]);
+  };
 
   const callUser = () => {
     const peer = createPeerConnection(true);
