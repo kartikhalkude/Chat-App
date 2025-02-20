@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import styled from 'styled-components';
 import { motion, AnimatePresence } from 'framer-motion';
 import { FiPhoneOff, FiMic, FiMicOff, FiVideo, FiVideoOff } from 'react-icons/fi';
-import Peer from 'simple-peer/simplepeer.min.js';
+import Peer from 'simple-peer';
 
 interface VideoCallProps {
   socket: any;
@@ -11,12 +11,6 @@ interface VideoCallProps {
   onClose: () => void;
   isReceivingCall?: boolean;
   signal?: any;
-}
-
-interface PeerSignalData {
-  type: string;
-  sdp?: string;
-  candidate?: RTCIceCandidate;
 }
 
 const VideoCall: React.FC<VideoCallProps> = ({
@@ -31,234 +25,145 @@ const VideoCall: React.FC<VideoCallProps> = ({
   const [callAccepted, setCallAccepted] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoEnabled, setIsVideoEnabled] = useState(true);
-  const [iceServers, setIceServers] = useState<RTCIceServer[]>([]);
-  const [connectionState, setConnectionState] = useState<string>('new');
   
   const myVideo = useRef<HTMLVideoElement>(null);
   const userVideo = useRef<HTMLVideoElement>(null);
   const connectionRef = useRef<any>();
-  const streamRef = useRef<MediaStream | null>(null);
-  const remoteStreamRef = useRef<MediaStream | null>(null);
-
-  const cleanupMediaStream = () => {
-    console.log('Starting media stream cleanup...');
-
-    const cleanupStream = (stream: MediaStream | null, label: string) => {
-      if (stream) {
-        const tracks = stream.getTracks();
-        tracks.forEach(track => {
-          track.enabled = false;
-          track.stop();
-          stream.removeTrack(track);
-          console.log(`Stopped ${label} track: ${track.kind}, ID: ${track.id}, Enabled: ${track.enabled}`);
-        });
-        return null;
-      }
-      return null;
-    };
-
-    streamRef.current = cleanupStream(streamRef.current, 'local');
-    remoteStreamRef.current = cleanupStream(remoteStreamRef.current, 'remote');
-
-    if (myVideo.current && myVideo.current.srcObject) {
-      const stream = myVideo.current.srcObject as MediaStream;
-      cleanupStream(stream, 'myVideo');
-      myVideo.current.srcObject = null;
-      console.log('Cleaned up myVideo element');
-    }
-
-    if (userVideo.current && userVideo.current.srcObject) {
-      const stream = userVideo.current.srcObject as MediaStream;
-      cleanupStream(stream, 'userVideo');
-      userVideo.current.srcObject = null;
-      console.log('Cleaned up userVideo element');
-    }
-
-    if (stream) {
-      cleanupStream(stream, 'state');
-      setStream(null);
-    }
-
-    console.log('Media stream cleanup completed');
-  };
 
   useEffect(() => {
-    const fetchIceServers = async () => {
-      try {
-        const response = await fetch('/api/ice-servers');
-        const data = await response.json();
-        console.log('ICE servers response:', data);
-        
-        if (data.iceServers && Array.isArray(data.iceServers)) {
-          // Add Google STUN servers as fallback
-          const combinedServers = [
-            ...data.iceServers,
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' }
-          ];
-          console.log('Using ICE servers:', combinedServers);
-          setIceServers(combinedServers);
-        } else {
-          throw new Error('Invalid ICE servers format');
-        }
-      } catch (error) {
-        console.error('Failed to fetch ICE servers:', error);
-        setIceServers([
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'stun:stun2.l.google.com:19302' }
-        ]);
-      }
-    };
-
-    fetchIceServers();
-
-    navigator.mediaDevices.getUserMedia({ 
-      video: { 
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-        facingMode: 'user'
-      }, 
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true
+    // Request camera and microphone permissions
+    navigator.mediaDevices.getUserMedia({
+      video: true,
+      audio: true
+    })
+    .then((currentStream) => {
+      setStream(currentStream);
+      if (myVideo.current) {
+        myVideo.current.srcObject = currentStream;
       }
     })
-      .then((currentStream) => {
-        setStream(currentStream);
-        streamRef.current = currentStream;
-        if (myVideo.current) {
-          myVideo.current.srcObject = currentStream;
-        }
-      })
-      .catch((error) => {
-        console.error('Error accessing media devices:', error);
-        onClose();
-      });
+    .catch((error) => {
+      console.error('Error accessing media devices:', error);
+      onClose();
+    });
 
+    // Cleanup function
     return () => {
-      cleanupMediaStream();
+      if (stream) {
+        stream.getTracks().forEach(track => {
+          track.stop();
+        });
+      }
       if (connectionRef.current) {
         connectionRef.current.destroy();
-        connectionRef.current = null;
       }
     };
   }, []);
 
   useEffect(() => {
-    if (!stream || !iceServers.length) return;
+    if (!stream) return;
 
-    const setupCall = () => {
+    // Setup call after a small delay to ensure stream is ready
+    const timer = setTimeout(() => {
       if (isReceivingCall && signal) {
         answerCall();
       } else if (!isReceivingCall) {
         callUser();
       }
-    };
+    }, 1000);
 
-    // Add a small delay to ensure everything is initialized
-    const timer = setTimeout(setupCall, 1000);
     return () => clearTimeout(timer);
-  }, [stream, iceServers]);
-
-  const initializePeer = (initiator: boolean) => {
-    if (!stream) return null;
-
-    try {
-      const peer = new Peer({
-        initiator,
-        trickle: true,
-        stream,
-        config: {
-          iceServers,
-          iceTransportPolicy: 'all',
-          sdpSemantics: 'unified-plan'
-        }
-      });
-
-      peer.on('error', (err: Error) => {
-        console.error('Peer error:', err);
-        if (connectionState !== 'connected') {
-          endCall();
-        }
-      });
-
-      peer.on('connect', () => {
-        console.log('Peer connection established');
-        setConnectionState('connected');
-      });
-
-      peer.on('close', () => {
-        console.log('Peer connection closed');
-        endCall();
-      });
-
-      return peer;
-    } catch (error) {
-      console.error('Error creating peer:', error);
-      return null;
-    }
-  };
+  }, [stream]);
 
   const callUser = () => {
-    const peer = initializePeer(true);
-    if (!peer) return;
-
-    peer.on('signal', (data: PeerSignalData) => {
-      socket.emit('callUser', {
-        userToCall: selectedUser,
-        signalData: data,
-        from: currentUser,
+    try {
+      const peer = new Peer({
+        initiator: true,
+        trickle: false,
+        stream: stream!,
+        config: {
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun2.l.google.com:19302' },
+            { urls: 'stun:stun3.l.google.com:19302' },
+            { urls: 'stun:stun4.l.google.com:19302' }
+          ]
+        }
       });
-    });
 
-    peer.on('stream', (remoteStream: MediaStream) => {
-      remoteStreamRef.current = remoteStream;
-      if (userVideo.current) {
-        userVideo.current.srcObject = remoteStream;
-      }
-    });
+      peer.on('signal', (data) => {
+        socket.emit('callUser', {
+          userToCall: selectedUser,
+          signalData: data,
+          from: currentUser
+        });
+      });
 
-    socket.on('callAccepted', (incomingSignal: PeerSignalData) => {
-      try {
-        peer.signal(incomingSignal);
-        setCallAccepted(true);
-      } catch (error) {
-        console.error('Error handling incoming signal:', error);
+      peer.on('stream', (remoteStream: MediaStream) => {
+        console.log('Received remote stream:', remoteStream);
+        if (userVideo.current) {
+          userVideo.current.srcObject = remoteStream;
+        }
+      });
+
+      peer.on('error', (err) => {
+        console.error('Peer connection error:', err);
         endCall();
-      }
-    });
+      });
 
-    connectionRef.current = peer;
+      socket.on('callAccepted', (signal: any) => {
+        peer.signal(signal);
+        setCallAccepted(true);
+      });
+
+      connectionRef.current = peer;
+    } catch (error) {
+      console.error('Error in callUser:', error);
+      endCall();
+    }
   };
 
   const answerCall = () => {
-    if (!stream || !signal) return;
-
-    const peer = initializePeer(false);
-    if (!peer) return;
-
-    peer.on('signal', (data: PeerSignalData) => {
-      socket.emit('answerCall', { signal: data, to: selectedUser });
-    });
-
-    peer.on('stream', (remoteStream: MediaStream) => {
-      remoteStreamRef.current = remoteStream;
-      if (userVideo.current) {
-        userVideo.current.srcObject = remoteStream;
-      }
-    });
-
     try {
+      const peer = new Peer({
+        initiator: false,
+        trickle: false,
+        stream: stream!,
+        config: {
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun2.l.google.com:19302' },
+            { urls: 'stun:stun3.l.google.com:19302' },
+            { urls: 'stun:stun4.l.google.com:19302' }
+          ]
+        }
+      });
+
+      peer.on('signal', (data) => {
+        socket.emit('answerCall', { signal: data, to: selectedUser });
+      });
+
+      peer.on('stream', (remoteStream: MediaStream) => {
+        console.log('Received remote stream:', remoteStream);
+        if (userVideo.current) {
+          userVideo.current.srcObject = remoteStream;
+        }
+      });
+
+      peer.on('error', (err) => {
+        console.error('Peer connection error:', err);
+        endCall();
+      });
+
       peer.signal(signal);
       setCallAccepted(true);
+      connectionRef.current = peer;
     } catch (error) {
-      console.error('Error signaling peer:', error);
+      console.error('Error in answerCall:', error);
       endCall();
     }
-
-    connectionRef.current = peer;
   };
 
   const toggleMute = () => {
@@ -278,49 +183,32 @@ const VideoCall: React.FC<VideoCallProps> = ({
   };
 
   const endCall = () => {
-    console.log('Initiating call end process...');
-    
     try {
       if (stream) {
         stream.getTracks().forEach(track => {
-          track.enabled = false;
+          track.stop();
         });
       }
 
       if (connectionRef.current) {
         connectionRef.current.destroy();
-        connectionRef.current = null;
-        console.log('Peer connection destroyed');
       }
 
-      cleanupMediaStream();
       socket.emit('endCall', { user: selectedUser });
-      
-      setCallAccepted(false);
-      setIsMuted(false);
-      setIsVideoEnabled(false);
-      setConnectionState('closed');
-
-    } catch (error) {
-      console.error('Error during call end:', error);
-    } finally {
-      try {
-        cleanupMediaStream();
-      } catch (e) {
-        console.error('Final cleanup attempt failed:', e);
-      }
       onClose();
+    } catch (error) {
+      console.error('Error ending call:', error);
     }
   };
 
   useEffect(() => {
     socket.on('endCall', () => {
-      console.log('Received endCall event from peer');
       endCall();
     });
 
     return () => {
       socket.off('endCall');
+      socket.off('callAccepted');
     };
   }, [socket]);
 
