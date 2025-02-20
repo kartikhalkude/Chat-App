@@ -13,6 +13,12 @@ interface VideoCallProps {
   signal?: any;
 }
 
+interface PeerSignalData {
+  type: string;
+  sdp?: string;
+  candidate?: RTCIceCandidate;
+}
+
 const VideoCall: React.FC<VideoCallProps> = ({
   socket,
   selectedUser,
@@ -26,6 +32,7 @@ const VideoCall: React.FC<VideoCallProps> = ({
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoEnabled, setIsVideoEnabled] = useState(true);
   const [iceServers, setIceServers] = useState<RTCIceServer[]>([]);
+  const [connectionState, setConnectionState] = useState<string>('new');
   
   const myVideo = useRef<HTMLVideoElement>(null);
   const userVideo = useRef<HTMLVideoElement>(null);
@@ -36,14 +43,11 @@ const VideoCall: React.FC<VideoCallProps> = ({
   const cleanupMediaStream = () => {
     console.log('Starting media stream cleanup...');
 
-    // Helper function to safely cleanup a stream
     const cleanupStream = (stream: MediaStream | null, label: string) => {
       if (stream) {
         const tracks = stream.getTracks();
         tracks.forEach(track => {
-          // First disable the track
           track.enabled = false;
-          // Then stop it
           track.stop();
           stream.removeTrack(track);
           console.log(`Stopped ${label} track: ${track.kind}, ID: ${track.id}, Enabled: ${track.enabled}`);
@@ -53,13 +57,9 @@ const VideoCall: React.FC<VideoCallProps> = ({
       return null;
     };
 
-    // Clean up the local stream reference
     streamRef.current = cleanupStream(streamRef.current, 'local');
-
-    // Clean up the remote stream reference
     remoteStreamRef.current = cleanupStream(remoteStreamRef.current, 'remote');
 
-    // Clean up video elements
     if (myVideo.current && myVideo.current.srcObject) {
       const stream = myVideo.current.srcObject as MediaStream;
       cleanupStream(stream, 'myVideo');
@@ -74,7 +74,6 @@ const VideoCall: React.FC<VideoCallProps> = ({
       console.log('Cleaned up userVideo element');
     }
 
-    // Clean up the state stream
     if (stream) {
       cleanupStream(stream, 'state');
       setStream(null);
@@ -84,7 +83,6 @@ const VideoCall: React.FC<VideoCallProps> = ({
   };
 
   useEffect(() => {
-    // Fetch ICE servers first
     const fetchIceServers = async () => {
       try {
         const response = await fetch('/api/ice-servers');
@@ -92,35 +90,40 @@ const VideoCall: React.FC<VideoCallProps> = ({
         console.log('ICE servers response:', data);
         
         if (data.iceServers && Array.isArray(data.iceServers)) {
-          console.log('Using ICE servers:', data.iceServers);
-          setIceServers(data.iceServers);
-        } else {
-          console.error('Invalid ICE servers format:', data);
-          // Fallback to default STUN servers
-          setIceServers([
+          // Add Google STUN servers as fallback
+          const combinedServers = [
+            ...data.iceServers,
             { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:global.stun.twilio.com:3478' }
-          ]);
+            { urls: 'stun:stun1.l.google.com:19302' }
+          ];
+          console.log('Using ICE servers:', combinedServers);
+          setIceServers(combinedServers);
+        } else {
+          throw new Error('Invalid ICE servers format');
         }
       } catch (error) {
         console.error('Failed to fetch ICE servers:', error);
-        // Fallback to default STUN servers
         setIceServers([
           { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:global.stun.twilio.com:3478' }
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun2.l.google.com:19302' }
         ]);
       }
     };
 
     fetchIceServers();
 
-    // Request camera and microphone permissions
     navigator.mediaDevices.getUserMedia({ 
       video: { 
         width: { ideal: 1280 },
-        height: { ideal: 720 }
+        height: { ideal: 720 },
+        facingMode: 'user'
       }, 
-      audio: true 
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      }
     })
       .then((currentStream) => {
         setStream(currentStream);
@@ -140,13 +143,11 @@ const VideoCall: React.FC<VideoCallProps> = ({
         connectionRef.current.destroy();
         connectionRef.current = null;
       }
-      socket.off('callAccepted');
-      socket.off('callEnded');
     };
   }, []);
 
   useEffect(() => {
-    if (!stream) return;
+    if (!stream || !iceServers.length) return;
 
     const setupCall = () => {
       if (isReceivingCall && signal) {
@@ -156,98 +157,108 @@ const VideoCall: React.FC<VideoCallProps> = ({
       }
     };
 
-    const timer = setTimeout(setupCall, 100);
+    // Add a small delay to ensure everything is initialized
+    const timer = setTimeout(setupCall, 1000);
     return () => clearTimeout(timer);
-  }, [stream]);
+  }, [stream, iceServers]);
 
-  const callUser = () => {
-    if (!stream) return;
+  const initializePeer = (initiator: boolean) => {
+    if (!stream) return null;
 
     try {
       const peer = new Peer({
-        initiator: true,
-        trickle: false,
+        initiator,
+        trickle: true,
         stream,
         config: {
-          iceServers
+          iceServers,
+          iceTransportPolicy: 'all',
+          sdpSemantics: 'unified-plan'
         }
       });
 
-      peer.on('signal', (data) => {
-        socket.emit('callUser', {
-          userToCall: selectedUser,
-          signalData: data,
-          from: currentUser,
-        });
-      });
-
-      peer.on('stream', (remoteStream) => {
-        remoteStreamRef.current = remoteStream;
-        if (userVideo.current) {
-          userVideo.current.srcObject = remoteStream;
-        }
-      });
-
-      socket.off('callAccepted');
-      socket.on('callAccepted', (incomingSignal: any) => {
-        try {
-          peer.signal(incomingSignal);
-          setCallAccepted(true);
-        } catch (error) {
-          console.error('Error handling incoming signal:', error);
+      peer.on('error', (err: Error) => {
+        console.error('Peer error:', err);
+        if (connectionState !== 'connected') {
           endCall();
         }
       });
 
-      connectionRef.current = peer;
+      peer.on('connect', () => {
+        console.log('Peer connection established');
+        setConnectionState('connected');
+      });
+
+      peer.on('close', () => {
+        console.log('Peer connection closed');
+        endCall();
+      });
+
+      return peer;
     } catch (error) {
-      console.error('Error creating peer connection:', error);
-      endCall();
+      console.error('Error creating peer:', error);
+      return null;
     }
+  };
+
+  const callUser = () => {
+    const peer = initializePeer(true);
+    if (!peer) return;
+
+    peer.on('signal', (data: PeerSignalData) => {
+      socket.emit('callUser', {
+        userToCall: selectedUser,
+        signalData: data,
+        from: currentUser,
+      });
+    });
+
+    peer.on('stream', (remoteStream: MediaStream) => {
+      remoteStreamRef.current = remoteStream;
+      if (userVideo.current) {
+        userVideo.current.srcObject = remoteStream;
+      }
+    });
+
+    socket.on('callAccepted', (incomingSignal: PeerSignalData) => {
+      try {
+        peer.signal(incomingSignal);
+        setCallAccepted(true);
+      } catch (error) {
+        console.error('Error handling incoming signal:', error);
+        endCall();
+      }
+    });
+
+    connectionRef.current = peer;
   };
 
   const answerCall = () => {
     if (!stream || !signal) return;
 
-    try {
-      const peer = new Peer({
-        initiator: false,
-        trickle: false,
-        stream,
-        config: {
-          iceServers
-        }
-      });
+    const peer = initializePeer(false);
+    if (!peer) return;
 
-      peer.on('signal', (data) => {
-        socket.emit('answerCall', { signal: data, to: selectedUser });
-      });
+    peer.on('signal', (data: PeerSignalData) => {
+      socket.emit('answerCall', { signal: data, to: selectedUser });
+    });
 
-      peer.on('stream', (remoteStream) => {
-        remoteStreamRef.current = remoteStream;
-        if (userVideo.current) {
-          userVideo.current.srcObject = remoteStream;
-        }
-      });
-
-      peer.on('error', (err) => {
-        console.error('Peer connection error:', err);
-        endCall();
-      });
-
-      try {
-        peer.signal(signal);
-        setCallAccepted(true);
-      } catch (error) {
-        console.error('Error signaling peer:', error);
-        endCall();
+    peer.on('stream', (remoteStream: MediaStream) => {
+      remoteStreamRef.current = remoteStream;
+      if (userVideo.current) {
+        userVideo.current.srcObject = remoteStream;
       }
+    });
 
-      connectionRef.current = peer;
+    try {
+      peer.signal(signal);
+      setCallAccepted(true);
     } catch (error) {
-      console.error('Error answering call:', error);
+      console.error('Error signaling peer:', error);
       endCall();
     }
+
+    connectionRef.current = peer;
   };
 
   const toggleMute = () => {
@@ -270,35 +281,29 @@ const VideoCall: React.FC<VideoCallProps> = ({
     console.log('Initiating call end process...');
     
     try {
-      // First, ensure all media is turned off
       if (stream) {
         stream.getTracks().forEach(track => {
           track.enabled = false;
         });
       }
 
-      // Destroy the peer connection
       if (connectionRef.current) {
         connectionRef.current.destroy();
         connectionRef.current = null;
         console.log('Peer connection destroyed');
       }
 
-      // Clean up all media streams
       cleanupMediaStream();
-
-      // Notify the other user to also cleanup their streams
       socket.emit('endCall', { user: selectedUser });
       
-      // Reset all state
       setCallAccepted(false);
       setIsMuted(false);
       setIsVideoEnabled(false);
+      setConnectionState('closed');
 
     } catch (error) {
       console.error('Error during call end:', error);
     } finally {
-      // Ensure one final cleanup attempt before closing
       try {
         cleanupMediaStream();
       } catch (e) {
@@ -308,7 +313,6 @@ const VideoCall: React.FC<VideoCallProps> = ({
     }
   };
 
-  // Add effect to handle incoming endCall event
   useEffect(() => {
     socket.on('endCall', () => {
       console.log('Received endCall event from peer');
