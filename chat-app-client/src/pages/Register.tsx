@@ -3,6 +3,9 @@ import { useNavigate, Link } from 'react-router-dom';
 import styled from 'styled-components';
 import { motion } from 'framer-motion';
 import { FiUser, FiLock } from 'react-icons/fi';
+import Logo from '../components/Logo';
+import { toast, ToastContainer } from 'react-toastify';
+import 'react-toastify/dist/ReactToastify.css';
 
 const Register = () => {
   const [username, setUsername] = useState('');
@@ -16,6 +19,7 @@ const Register = () => {
     setError('');
 
     if (password !== confirmPassword) {
+      toast.error('Passwords do not match');
       setError('Passwords do not match');
       return;
     }
@@ -31,12 +35,15 @@ const Register = () => {
 
       const data = await response.json();
       if (data.success) {
-        navigate('/login');
+        toast.success('Registration successful! Please login.');
+        setTimeout(() => navigate('/login'), 1500);
       } else {
+        toast.error(data.message || 'Registration failed');
         setError(data.message || 'Registration failed');
       }
     } catch (error) {
       console.error('Registration failed:', error);
+      toast.error('Registration failed. Please try again.');
       setError('Registration failed. Please try again.');
     }
   };
@@ -47,13 +54,29 @@ const Register = () => {
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
     >
+      <ToastContainer
+        position="top-right"
+        autoClose={3000}
+        hideProgressBar={false}
+        newestOnTop
+        closeOnClick
+        rtl={false}
+        pauseOnFocusLoss
+        draggable
+        pauseOnHover
+        theme="dark"
+      />
+      
       <FormCard
         initial={{ y: 20, opacity: 0 }}
         animate={{ y: 0, opacity: 1 }}
         transition={{ delay: 0.2 }}
       >
+        <LogoContainer>
+          <Logo size="large" />
+        </LogoContainer>
         <Title>Create Account</Title>
-        <Subtitle>Join our chat community</Subtitle>
+        <Subtitle>Join the ChatWave community</Subtitle>
         
         <Form onSubmit={handleSubmit}>
           <InputGroup>
@@ -121,15 +144,24 @@ const Container = styled(motion.div)`
   justify-content: center;
   min-height: 100vh;
   padding: 2rem;
+  background: linear-gradient(135deg, 
+    ${({ theme }) => theme.colors.background} 0%,
+    ${({ theme }) => theme.colors.surface} 100%);
 `;
 
 const FormCard = styled(motion.div)`
   background-color: ${({ theme }) => theme.colors.surface};
   padding: 2.5rem;
-  border-radius: ${({ theme }) => theme.borderRadius.large};
+  border-radius: ${({ theme }) => theme.borderRadius.xl};
   width: 100%;
-  max-width: 400px;
-  box-shadow: ${({ theme }) => theme.shadows.large};
+  max-width: 420px;
+  box-shadow: ${({ theme }) => theme.shadows.xl};
+`;
+
+const LogoContainer = styled.div`
+  display: flex;
+  justify-content: center;
+  margin-bottom: 2rem;
 `;
 
 const Title = styled.h1`
@@ -167,16 +199,17 @@ const InputIcon = styled.div`
 
 const Input = styled.input`
   width: 100%;
-  padding: 1rem 1rem 1rem 3rem;
+  padding: 0.875rem 1rem 0.875rem 2.75rem;
   background-color: ${({ theme }) => theme.colors.background};
   border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.borderRadius.medium};
   color: ${({ theme }) => theme.colors.text};
-  transition: border-color ${({ theme }) => theme.transitions.fast};
+  transition: all ${({ theme }) => theme.transitions.fast};
 
   &:focus {
     outline: none;
     border-color: ${({ theme }) => theme.colors.primary};
+    box-shadow: 0 0 0 3px ${({ theme }) => `${theme.colors.primary}20`};
   }
 
   &::placeholder {
@@ -191,15 +224,23 @@ const ErrorMessage = styled.div`
 `;
 
 const Button = styled(motion.button)`
+  width: 100%;
   background-color: ${({ theme }) => theme.colors.primary};
   color: white;
-  padding: 1rem;
+  padding: 0.875rem;
   border-radius: ${({ theme }) => theme.borderRadius.medium};
   font-weight: 600;
-  transition: background-color ${({ theme }) => theme.transitions.fast};
+  transition: all ${({ theme }) => theme.transitions.fast};
+  box-shadow: ${({ theme }) => theme.shadows.small};
 
   &:hover {
-    background-color: ${({ theme }) => theme.colors.primaryLight};
+    background-color: ${({ theme }) => theme.colors.primaryDark};
+    transform: translateY(-1px);
+    box-shadow: ${({ theme }) => theme.shadows.medium};
+  }
+
+  &:active {
+    transform: translateY(0);
   }
 `;
 

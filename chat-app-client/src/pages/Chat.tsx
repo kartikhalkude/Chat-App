@@ -3,10 +3,12 @@ import { useNavigate } from 'react-router-dom';
 import styled from 'styled-components';
 import { motion, AnimatePresence } from 'framer-motion';
 import { io, Socket } from 'socket.io-client';
-import { FiSend, FiLogOut, FiUsers, FiSmile, FiMoreVertical, FiCheck, FiCheckCircle, FiTrash2, FiX, FiPhone, FiPhoneIncoming, FiPhoneOff } from 'react-icons/fi';
+import { FiSend, FiLogOut, FiUsers, FiSmile, FiMoreVertical, FiCheck, FiCheckCircle, FiTrash2, FiX, FiPhone, FiPhoneIncoming, FiPhoneOff, FiArrowLeft, FiZap } from 'react-icons/fi';
 import data from '@emoji-mart/data';
 import Picker from '@emoji-mart/react';
 import VideoCall from '../components/VideoCall';
+import { playRingtone, stopRingtone } from '../utils/audioUtils';
+import ReactDOM from 'react-dom';
 
 interface Message {
   _id: string;
@@ -36,6 +38,11 @@ interface CallState {
   signal: any;
 }
 
+interface ShortMessage {
+  text: string;
+  icon?: string;
+}
+
 const Chat = () => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [newMessage, setNewMessage] = useState('');
@@ -58,6 +65,17 @@ const Chat = () => {
   const actionsMenuRef = useRef<HTMLDivElement>(null);
   const [isInCall, setIsInCall] = useState(false);
   const [callState, setCallState] = useState<CallState | null>(null);
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
+
+  const shortMessages: ShortMessage[] = [
+    { text: "👋 Hi there!" },
+    { text: "How are you?" },
+    { text: "Talk to you later!" },
+    { text: "In a meeting right now" },
+    { text: "Be right back" },
+    { text: "Thanks!" },
+  ];
 
   useEffect(() => {
     const newSocket = io('/', {
@@ -85,12 +103,29 @@ const Chat = () => {
   }, [selectedUser]);
 
   useEffect(() => {
-    if (socket) {
-      socket.on('typing', ({ username, isTyping }) => {
-        setTypingUsers(prev => ({ ...prev, [username]: isTyping }));
-      });
+    // Request notification permissions when component mounts
+    const requestNotificationPermission = async () => {
+      try {
+        if ('Notification' in window) {
+          const permission = await Notification.requestPermission();
+          setNotificationsEnabled(permission === 'granted');
+        }
+      } catch (error) {
+        console.error('Error requesting notification permission:', error);
+      }
+    };
+    requestNotificationPermission();
+  }, []);
 
-      socket.on('receive_message', (message: Message) => {
+  useEffect(() => {
+    if (socket) {
+      // Create a single handler for typing events
+      const handleTyping = ({ username, isTyping }: { username: string; isTyping: boolean }) => {
+        setTypingUsers(prev => ({ ...prev, [username]: isTyping }));
+      };
+
+      // Create a single handler for receiving messages
+      const handleReceiveMessage = (message: Message) => {
         if (
           (message.sender === selectedUser && message.receiver === currentUser) ||
           (message.sender === currentUser && message.receiver === selectedUser)
@@ -110,50 +145,164 @@ const Chat = () => {
             ...prev,
             [message.sender]: (prev[message.sender] || 0) + 1
           }));
-        }
-      });
 
-      socket.on('message_read', ({ messageId }) => {
+          // Show desktop notification for new message
+          if (notificationsEnabled && document.visibilityState === 'hidden') {
+            try {
+              const notification = new Notification('New Message', {
+                body: `${message.sender}: ${message.message}`,
+                icon: '/chat-icon.png',
+                tag: 'chat-message',
+              });
+
+              setTimeout(() => notification.close(), 5000);
+
+              notification.onclick = () => {
+                window.focus();
+                handleUserSelect(message.sender);
+              };
+            } catch (error) {
+              console.error('Error showing notification:', error);
+            }
+          }
+        }
+      };
+
+      // Create a single handler for message read status
+      const handleMessageRead = ({ messageId }: { messageId: string }) => {
         setMessages(prev => 
           prev.map(msg => 
             msg._id === messageId ? { ...msg, status: 'read' } : msg
           )
         );
-      });
+      };
 
-      socket.on('messages_deleted', ({ deletedMessages }: { deletedMessages: DeletedMessages[] }) => {
+      // Create a single handler for deleted messages
+      const handleMessagesDeleted = ({ deletedMessages }: { deletedMessages: DeletedMessages[] }) => {
         setMessages(prev => {
-          // Remove all messages that were deleted
           const updatedMessages = prev.filter(msg => 
             !deletedMessages.some(deleted => deleted._id === msg._id)
           );
           return updatedMessages;
         });
-      });
+      };
 
-      socket.on('callUser', ({ from, signal }) => {
+      // Create a single handler for incoming calls
+      const handleIncomingCall = ({ from, signal }: { from: string; signal: any }) => {
+        console.log('Incoming call from:', from);
         setCallState({
           isReceivingCall: true,
           from,
           signal
         });
-      });
 
-      socket.on('endCall', () => {
+        if (notificationsEnabled && document.visibilityState === 'hidden') {
+          try {
+            const notification = new Notification('Incoming Video Call', {
+              body: `${from} is calling you`,
+              icon: '/chat-icon.png',
+              tag: 'video-call',
+              requireInteraction: true
+            });
+
+            notification.onclick = () => {
+              window.focus();
+              handleAcceptCall();
+              notification.close();
+            };
+          } catch (error) {
+            console.error('Error showing call notification:', error);
+          }
+        }
+
+        playRingtone().catch(error => {
+          console.error('Failed to play ringtone:', error);
+        });
+      };
+
+      // Create a single handler for call end
+      const handleCallEnd = async () => {
+        console.log('Call ended');
+        stopRingtone();
         setIsInCall(false);
         setCallState(null);
-      });
 
+        if (notificationsEnabled && 'serviceWorker' in navigator) {
+          try {
+            const registrations = await navigator.serviceWorker.getRegistrations();
+            for (const registration of registrations) {
+              const notifications = await registration.getNotifications({ tag: 'video-call' });
+              notifications.forEach((notification: Notification) => notification.close());
+            }
+          } catch (error) {
+            console.error('Error closing call notification:', error);
+          }
+        }
+      };
+
+      // Create a single handler for rejected calls
+      const handleCallRejected = async () => {
+        console.log('Call was declined');
+        setIsInCall(false);
+        setCallState(null);
+
+        if (notificationsEnabled && 'serviceWorker' in navigator) {
+          try {
+            const registrations = await navigator.serviceWorker.getRegistrations();
+            for (const registration of registrations) {
+              const notifications = await registration.getNotifications({ tag: 'video-call' });
+              notifications.forEach((notification: Notification) => notification.close());
+            }
+          } catch (error) {
+            console.error('Error closing call notification:', error);
+          }
+        }
+
+        // Show declined call notification
+        const CallDeclinedModal = (
+          <IncomingCallModal
+            initial={{ opacity: 0, y: 50 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 50 }}
+          >
+            <CallInfo>
+              <CallerName>{selectedUser}</CallerName>
+              <CallStatus style={{ color: '#EF4444' }}>Call declined</CallStatus>
+            </CallInfo>
+          </IncomingCallModal>
+        );
+
+        const modalElement = document.createElement('div');
+        document.body.appendChild(modalElement);
+        ReactDOM.render(CallDeclinedModal, modalElement);
+
+        setTimeout(() => {
+          document.body.removeChild(modalElement);
+        }, 3000);
+      };
+
+      // Register all event handlers
+      socket.on('typing', handleTyping);
+      socket.on('receive_message', handleReceiveMessage);
+      socket.on('message_read', handleMessageRead);
+      socket.on('messages_deleted', handleMessagesDeleted);
+      socket.on('callUser', handleIncomingCall);
+      socket.on('endCall', handleCallEnd);
+      socket.on('callRejected', handleCallRejected);
+
+      // Cleanup function to remove all event listeners
       return () => {
-        socket.off('typing');
-        socket.off('receive_message');
-        socket.off('message_read');
-        socket.off('messages_deleted');
-        socket.off('callUser');
-        socket.off('endCall');
+        socket.off('typing', handleTyping);
+        socket.off('receive_message', handleReceiveMessage);
+        socket.off('message_read', handleMessageRead);
+        socket.off('messages_deleted', handleMessagesDeleted);
+        socket.off('callUser', handleIncomingCall);
+        socket.off('endCall', handleCallEnd);
+        socket.off('callRejected', handleCallRejected);
+        stopRingtone();
       };
     }
-  }, [socket, selectedUser, currentUser]);
+  }, [socket, selectedUser, currentUser, notificationsEnabled]);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -199,7 +348,7 @@ const Chat = () => {
       
       if (searchTerm) {
         setUsers(
-          filteredUsers.filter(user => 
+          filteredUsers.filter((user: User) => 
             user.username.toLowerCase().includes(searchTerm.toLowerCase())
           )
         );
@@ -223,7 +372,7 @@ const Chat = () => {
       );
       const data = await response.json();
       setMessages(data);
-      scrollToBottom();
+      setTimeout(scrollToBottom, 100);
     } catch (error) {
       console.error('Failed to fetch messages:', error);
     }
@@ -252,6 +401,11 @@ const Chat = () => {
     setShowEmojiPicker(false);
   };
 
+  const handleShortMessageSelect = (message: string) => {
+    setNewMessage(message);
+    setShowShortcuts(false);
+  };
+
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newMessage.trim() || !selectedUser || !socket) return;
@@ -266,6 +420,7 @@ const Chat = () => {
       socket.emit('send_message', messageData);
       setNewMessage('');
       setShowEmojiPicker(false);
+      scrollToBottom();
     } catch (error) {
       console.error('Failed to send message:', error);
     }
@@ -277,9 +432,9 @@ const Chat = () => {
   };
 
   const scrollToBottom = () => {
-    setTimeout(() => {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, 100);
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    }
   };
 
   const formatTime = (timestamp: string) => {
@@ -440,20 +595,31 @@ const Chat = () => {
 
   const handleAcceptCall = () => {
     if (callState) {
+      console.log('Call accepted');
+      stopRingtone();
       setIsInCall(true);
     }
   };
 
   const handleRejectCall = () => {
     if (callState) {
+      console.log('Call rejected');
+      stopRingtone();
       socket?.emit('rejectCall', { user: callState.from });
       setCallState(null);
     }
   };
 
   const handleEndCall = () => {
+    console.log('Ending call');
+    stopRingtone();
     setIsInCall(false);
     setCallState(null);
+  };
+
+  const handleBack = () => {
+    // Logic to close the chat or navigate back
+    handleEndCall(); // Assuming handleEndCall will handle closing the call
   };
 
   return (
@@ -517,6 +683,9 @@ const Chat = () => {
           <>
             <ChatHeader>
               <ChatWithUserContainer>
+                <BackButton onClick={() => setSelectedUser(null)}>
+                  <FiArrowLeft />
+                </BackButton>
                 {isSelectionMode ? (
                   <SelectionInfo>
                     <span>{selectedMessages.size} selected</span>
@@ -595,9 +764,14 @@ const Chat = () => {
                         {formatTime(message.timestamp)}
                       </MessageTime>
                       {message.sender === currentUser && (
-                        <MessageStatus>
+                        <MessageStatus className={message.status === 'read' ? 'read' : ''}>
                           {message.status === 'sent' && <FiCheck />}
-                          {message.status === 'delivered' && <><FiCheck /><FiCheck /></>}
+                          {message.status === 'delivered' && (
+                            <>
+                              <FiCheck />
+                              <FiCheck />
+                            </>
+                          )}
                           {message.status === 'read' && <FiCheckCircle />}
                         </MessageStatus>
                       )}
@@ -605,7 +779,7 @@ const Chat = () => {
                   </MessageBubble>
                 ))}
               </AnimatePresence>
-              <div ref={messagesEndRef} />
+              <div ref={messagesEndRef} style={{ height: '1px' }} />
             </MessagesContainer>
 
             <MessageForm onSubmit={handleSendMessage}>
@@ -628,6 +802,28 @@ const Chat = () => {
                   </EmojiPickerContainer>
                 )}
               </EmojiPickerWrapper>
+
+              <ShortcutWrapper>
+                <ShortcutButton
+                  type="button"
+                  onClick={() => setShowShortcuts(!showShortcuts)}
+                >
+                  <FiZap />
+                </ShortcutButton>
+                {showShortcuts && (
+                  <ShortcutMenu onClick={(e) => e.stopPropagation()}>
+                    {shortMessages.map((msg, index) => (
+                      <ShortcutItem
+                        key={index}
+                        onClick={() => handleShortMessageSelect(msg.text)}
+                      >
+                        {msg.text}
+                      </ShortcutItem>
+                    ))}
+                  </ShortcutMenu>
+                )}
+              </ShortcutWrapper>
+
               <MessageInput
                 type="text"
                 value={newMessage}
@@ -640,8 +836,6 @@ const Chat = () => {
               <SendButton
                 type="submit"
                 disabled={!newMessage.trim()}
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
               >
                 <FiSend />
               </SendButton>
@@ -682,7 +876,7 @@ const Chat = () => {
         {isInCall && (
           <VideoCall
             socket={socket}
-            selectedUser={callState?.from || selectedUser}
+            selectedUser={callState?.from || selectedUser || ''}
             currentUser={currentUser || ''}
             onClose={handleEndCall}
             isReceivingCall={callState?.isReceivingCall}
@@ -697,23 +891,42 @@ const Chat = () => {
 const Container = styled.div`
   display: flex;
   height: 100vh;
-  background-color: ${({ theme }) => theme.colors.background};
+  background: linear-gradient(135deg, 
+    ${({ theme }) => theme.colors.background} 0%,
+    ${({ theme }) => theme.colors.surface} 100%);
+  backdrop-filter: blur(10px);
+  animation: fadeIn 0.3s ease-in-out;
+
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
 `;
 
 const Sidebar = styled.div`
-  width: 300px;
-  background-color: ${({ theme }) => theme.colors.surface};
-  border-right: 1px solid ${({ theme }) => theme.colors.border};
+  width: ${({ theme }) => theme.layout.sidebarWidth};
+  background-color: ${({ theme }) => `${theme.colors.surface}CC`};
+  border-right: 1px solid ${({ theme }) => `${theme.colors.border}80`};
   display: flex;
   flex-direction: column;
+  box-shadow: ${({ theme }) => theme.shadows.medium};
+  backdrop-filter: blur(8px);
+  animation: slideIn 0.4s ease-out;
+
+  @keyframes slideIn {
+    from { transform: translateX(-100%); }
+    to { transform: translateX(0); }
+  }
 `;
 
 const SidebarHeader = styled.div`
-  padding: 1.5rem;
+  padding: 1.25rem;
   border-bottom: 1px solid ${({ theme }) => theme.colors.border};
   display: flex;
   justify-content: space-between;
   align-items: center;
+  background-color: ${({ theme }) => theme.colors.surface};
+  box-shadow: ${({ theme }) => theme.shadows.small};
 `;
 
 const Username = styled.h2`
@@ -731,58 +944,85 @@ const LogoutButton = styled.button`
   &:hover {
     color: ${({ theme }) => theme.colors.error};
     background-color: ${({ theme }) => theme.colors.background};
+    transform: scale(1.05);
+  }
+
+  &:active {
+    transform: scale(0.95);
   }
 `;
 
 const SearchContainer = styled.div`
   padding: 1rem;
-  border-bottom: 1px solid ${({ theme }) => theme.colors.border};
+  border-bottom: 1px solid #E4E8EB;
+  background-color: #ffffff;
 `;
 
 const SearchInput = styled.input`
   width: 100%;
   padding: 0.75rem 1rem;
-  background-color: ${({ theme }) => theme.colors.background};
-  border: 1px solid ${({ theme }) => theme.colors.border};
-  border-radius: ${({ theme }) => theme.borderRadius.medium};
-  color: ${({ theme }) => theme.colors.text};
-  transition: border-color ${({ theme }) => theme.transitions.fast};
+  background-color: #F5F7FB;
+  border: 1px solid #E4E8EB;
+  border-radius: 8px;
+  color: #1A1D1F;
+  
+  &::placeholder {
+    color: #98A2B3;
+  }
 
   &:focus {
     outline: none;
-    border-color: ${({ theme }) => theme.colors.primary};
+    border-color: #6366F1;
   }
 `;
 
 const UsersList = styled.div`
   flex: 1;
   overflow-y: auto;
-  padding: 1rem;
+  padding: 0.5rem;
+  background-color: #ffffff;
 `;
 
 const UserItem = styled(motion.div)<{ selected: boolean }>`
   display: flex;
   align-items: center;
-  padding: 1rem;
-  border-radius: ${({ theme }) => theme.borderRadius.medium};
+  padding: 0.75rem;
+  border-radius: ${({ theme }) => theme.borderRadius.large};
   cursor: pointer;
-  background-color: ${({ theme, selected }) =>
-    selected ? theme.colors.background : 'transparent'};
-  margin-bottom: 0.5rem;
+  background-color: ${({ selected, theme }) => 
+    selected ? `${theme.colors.background}CC` : 'transparent'};
+  margin-bottom: 0.25rem;
+  transition: all ${({ theme }) => theme.transitions.fast};
+  backdrop-filter: ${({ selected }) => selected ? 'blur(8px)' : 'none'};
+
+  &:hover {
+    background-color: ${({ theme }) => `${theme.colors.background}CC`};
+    transform: translateX(4px) scale(1.02);
+    backdrop-filter: blur(8px);
+  }
 `;
 
 const UserAvatar = styled.div<{ $small?: boolean }>`
   width: ${({ $small }) => $small ? '32px' : '40px'};
   height: ${({ $small }) => $small ? '32px' : '40px'};
   border-radius: ${({ theme }) => theme.borderRadius.round};
-  background-color: ${({ theme }) => theme.colors.primary};
+  background: linear-gradient(135deg, 
+    ${({ theme }) => theme.colors.primary} 0%,
+    ${({ theme }) => theme.colors.primaryDark} 100%);
   color: white;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: ${({ $small }) => $small ? '1rem' : '1.2rem'};
+  font-size: ${({ $small }) => $small ? '0.875rem' : '1rem'};
   font-weight: 600;
-  margin-right: 1rem;
+  margin-right: 0.75rem;
+  box-shadow: ${({ theme }) => theme.shadows.small};
+  transition: all ${({ theme }) => theme.transitions.fast};
+
+  &:hover {
+    transform: scale(1.05);
+    box-shadow: ${({ theme }) => theme.shadows.medium};
+  }
 `;
 
 const UserInfo = styled.div`
@@ -792,7 +1032,8 @@ const UserInfo = styled.div`
 const UserNameContainer = styled.div`
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  justify-content: space-between;
+  width: 100%;
 `;
 
 const UserName = styled.div`
@@ -810,14 +1051,62 @@ const ChatArea = styled.div`
   flex: 1;
   display: flex;
   flex-direction: column;
+  background-color: ${({ theme }) => `${theme.colors.surface}CC`};
+  backdrop-filter: blur(8px);
+  animation: fadeScale 0.4s ease-out;
+
+  @keyframes fadeScale {
+    from { 
+      opacity: 0;
+      transform: scale(0.98);
+    }
+    to { 
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
 `;
 
 const ChatHeader = styled.div`
-  padding: 1.5rem;
-  border-bottom: 1px solid ${({ theme }) => theme.colors.border};
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid ${({ theme }) => `${theme.colors.border}80`};
   display: flex;
   justify-content: space-between;
   align-items: center;
+  background-color: ${({ theme }) => `${theme.colors.surface}CC`};
+  backdrop-filter: blur(8px);
+  z-index: 2;
+`;
+
+const IconButton = styled.button`
+  color: ${({ theme }) => theme.colors.textSecondary};
+  font-size: 1.25rem;
+  padding: 0.5rem;
+  border-radius: ${({ theme }) => theme.borderRadius.round};
+  transition: all ${({ theme }) => theme.transitions.fast};
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: transparent;
+
+  &:hover {
+    color: ${({ theme }) => theme.colors.primary};
+    background-color: ${({ theme }) => theme.colors.background};
+    transform: scale(1.05);
+  }
+
+  &:active {
+    transform: scale(0.95);
+  }
+`;
+
+const BackButton = styled(IconButton)`
+  margin-right: 0.5rem;
+  
+  &:hover {
+    color: ${({ theme }) => theme.colors.primary};
+    background-color: ${({ theme }) => theme.colors.background};
+  }
 `;
 
 const ChatWithUserContainer = styled.div`
@@ -826,10 +1115,9 @@ const ChatWithUserContainer = styled.div`
   gap: 1rem;
 `;
 
-const ChatWithUser = styled.div`
-  display: flex;
-  align-items: center;
-  gap: 1rem;
+const Title = styled.h2`
+  margin-left: auto;
+  color: ${({ theme }) => theme.colors.text};
 `;
 
 const MessagesContainer = styled.div`
@@ -839,78 +1127,145 @@ const MessagesContainer = styled.div`
   display: flex;
   flex-direction: column;
   gap: 1rem;
+  background-color: #F5F7FB;
+  scroll-behavior: smooth;
 `;
 
 const MessageBubble = styled(motion.div)<{ sent: boolean; selected?: boolean; selectable?: boolean }>`
-  max-width: 70%;
-  padding: 1rem;
-  border-radius: ${({ theme }) => theme.borderRadius.large};
-  background-color: ${({ theme, sent, selected }) =>
-    selected ? theme.colors.primaryLight :
-    sent ? theme.colors.primary : theme.colors.surface};
+  max-width: 65%;
+  padding: 0.75rem 1rem;
+  border-radius: ${({ sent }) => sent ? '16px 16px 0 16px' : '16px 16px 16px 0'};
+  background-color: ${({ sent, theme }) => 
+    sent ? `${theme.colors.primary}15` : '#ffffff'};
+  color: ${({ sent, theme }) => 
+    sent ? theme.colors.text : theme.colors.primary};
   align-self: ${({ sent }) => (sent ? 'flex-end' : 'flex-start')};
+  box-shadow: ${({ theme }) => theme.shadows.small};
   position: relative;
-  cursor: ${({ selectable }) => selectable ? 'pointer' : 'default'};
-  transition: background-color ${({ theme }) => theme.transitions.fast};
+  border: 1px solid ${({ sent, theme }) => 
+    sent ? `${theme.colors.primary}30` : `${theme.colors.border}30`};
+  backdrop-filter: blur(4px);
+  will-change: transform;
+  transform-origin: ${({ sent }) => sent ? 'right' : 'left'};
+  transition: all ${({ theme }) => theme.transitions.fast} cubic-bezier(0.4, 0, 0.2, 1);
+  
+  ${({ selected, theme }) => selected && `
+    background-color: ${theme.colors.primary}30;
+    border-color: ${theme.colors.primary};
+    transform: scale(1.02);
+  `}
 
   &:hover {
-    background-color: ${({ theme, sent, selected }) =>
-      selected ? theme.colors.primaryLight :
-      sent ? theme.colors.primaryLight : theme.colors.surface};
+    transform: ${({ selectable }) => selectable ? 'scale(1.02)' : 'none'};
+    box-shadow: ${({ theme }) => theme.shadows.medium};
   }
+
+  @keyframes slideLeft {
+    from { 
+      opacity: 0;
+      transform: translateX(15px);
+    }
+    to { 
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+
+  @keyframes slideRight {
+    from { 
+      opacity: 0;
+      transform: translateX(-15px);
+    }
+    to { 
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+
+  animation: ${({ sent }) => sent ? 'slideLeft 0.2s ease-out' : 'slideRight 0.2s ease-out'};
 `;
 
 const MessageText = styled.div`
-  color: ${({ theme }) => theme.colors.text};
+  color: inherit;
   margin-bottom: 0.5rem;
+  line-height: 1.4;
 `;
 
 const MessageTime = styled.div`
   color: ${({ theme }) => theme.colors.textSecondary};
   font-size: 0.75rem;
-  text-align: right;
+  opacity: 0.8;
 `;
 
 const MessageForm = styled.form`
-  padding: 1.5rem;
+  padding: 1rem 1.5rem;
   display: flex;
   gap: 1rem;
-  border-top: 1px solid ${({ theme }) => theme.colors.border};
+  align-items: center;
+  background-color: ${({ theme }) => `${theme.colors.surface}CC`};
+  border-top: 1px solid ${({ theme }) => `${theme.colors.border}80`};
+  backdrop-filter: blur(8px);
+  z-index: 2;
 `;
 
 const MessageInput = styled.input`
   flex: 1;
-  padding: 1rem;
-  border-radius: ${({ theme }) => theme.borderRadius.medium};
-  background-color: ${({ theme }) => theme.colors.surface};
-  border: 1px solid ${({ theme }) => theme.colors.border};
+  padding: 0.75rem 1rem;
+  border-radius: 24px;
+  background-color: ${({ theme }) => `${theme.colors.background}CC`};
+  border: 1px solid ${({ theme }) => `${theme.colors.border}80`};
   color: ${({ theme }) => theme.colors.text};
-  transition: border-color ${({ theme }) => theme.transitions.fast};
+  backdrop-filter: blur(4px);
+  transition: all ${({ theme }) => theme.transitions.fast};
 
   &:focus {
     outline: none;
     border-color: ${({ theme }) => theme.colors.primary};
+    box-shadow: 0 0 0 3px ${({ theme }) => `${theme.colors.primary}20`};
+    transform: scale(1.01);
+  }
+
+  &::placeholder {
+    color: ${({ theme }) => theme.colors.textSecondary};
   }
 `;
 
 const SendButton = styled(motion.button)`
-  padding: 1rem;
-  border-radius: ${({ theme }) => theme.borderRadius.medium};
+  padding: 0.75rem;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
   background-color: ${({ theme }) => theme.colors.primary};
   color: white;
-  font-size: 1.2rem;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: background-color ${({ theme }) => theme.transitions.fast};
+  transition: all ${({ theme }) => theme.transitions.fast};
+  box-shadow: ${({ theme }) => theme.shadows.medium};
+
+  svg {
+    font-size: 1.25rem;
+    transform: translateX(1px);
+  }
 
   &:hover {
-    background-color: ${({ theme }) => theme.colors.primaryLight};
+    background-color: ${({ theme }) => theme.colors.primaryDark};
+    transform: scale(1.05);
+    box-shadow: ${({ theme }) => theme.shadows.large};
+  }
+
+  &:active {
+    transform: scale(0.95);
   }
 
   &:disabled {
     background-color: ${({ theme }) => theme.colors.border};
     cursor: not-allowed;
+    box-shadow: none;
+
+    svg {
+      color: ${({ theme }) => theme.colors.textSecondary};
+    }
   }
 `;
 
@@ -922,35 +1277,35 @@ const WelcomeMessage = styled.div`
   justify-content: center;
   color: ${({ theme }) => theme.colors.textSecondary};
   gap: 1rem;
+  text-align: center;
+  padding: 2rem;
 
   h2 {
     ${({ theme }) => theme.typography.h2};
     color: ${({ theme }) => theme.colors.text};
+    margin-bottom: 0.5rem;
+  }
+
+  p {
+    ${({ theme }) => theme.typography.body};
+    color: ${({ theme }) => theme.colors.textSecondary};
   }
 `;
 
 const HeaderActions = styled.div`
   display: flex;
+  align-items: center;
   gap: 1rem;
-`;
-
-const IconButton = styled.button`
-  color: ${({ theme }) => theme.colors.textSecondary};
-  font-size: 1.2rem;
-  padding: 0.5rem;
-  border-radius: ${({ theme }) => theme.borderRadius.medium};
-  transition: all ${({ theme }) => theme.transitions.fast};
-
-  &:hover {
-    color: ${({ theme }) => theme.colors.text};
-    background-color: ${({ theme }) => theme.colors.background};
-  }
+  margin-left: auto;
 `;
 
 const MessageInfo = styled.div`
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  margin-top: 0.4rem;
+  opacity: 0.9;
 `;
 
 const MessageStatus = styled.div`
@@ -958,10 +1313,18 @@ const MessageStatus = styled.div`
   align-items: center;
   color: ${({ theme }) => theme.colors.textSecondary};
   font-size: 0.875rem;
+  padding-left: 0.25rem;
 
   svg {
-    width: 14px;
-    height: 14px;
+    width: 16px;
+    height: 16px;
+    &:last-child {
+      margin-left: -6px;
+    }
+  }
+
+  &.read {
+    color: ${({ theme }) => theme.colors.success};
   }
 `;
 
@@ -969,6 +1332,14 @@ const TypingIndicator = styled.span`
   color: ${({ theme }) => theme.colors.primary};
   font-size: 0.875rem;
   font-style: italic;
+  opacity: 0.8;
+  animation: fadeInOut 1.5s infinite;
+
+  @keyframes fadeInOut {
+    0% { opacity: 0.4; }
+    50% { opacity: 0.8; }
+    100% { opacity: 0.4; }
+  }
 `;
 
 const EmojiPickerWrapper = styled.div`
@@ -978,9 +1349,12 @@ const EmojiPickerWrapper = styled.div`
 const EmojiPickerContainer = styled.div`
   position: absolute;
   bottom: 100%;
-  left: 0;
+  right: 0;
   margin-bottom: 10px;
   z-index: 1000;
+  box-shadow: ${({ theme }) => theme.shadows.large};
+  border-radius: ${({ theme }) => theme.borderRadius.medium};
+  overflow: hidden;
 
   em-emoji-picker {
     --background-rgb: ${({ theme }) => theme.colors.surface};
@@ -993,7 +1367,7 @@ const EmojiPickerContainer = styled.div`
     content: '';
     position: absolute;
     bottom: -8px;
-    left: 15px;
+    right: 15px;
     border-left: 8px solid transparent;
     border-right: 8px solid transparent;
     border-top: 8px solid ${({ theme }) => theme.colors.surface};
@@ -1002,28 +1376,41 @@ const EmojiPickerContainer = styled.div`
 
 const EmojiButton = styled.button`
   color: ${({ theme }) => theme.colors.textSecondary};
-  font-size: 1.2rem;
-  padding: 0.5rem;
-  border-radius: ${({ theme }) => theme.borderRadius.medium};
+  font-size: 1.4rem;
+  padding: 0.7rem;
+  border-radius: ${({ theme }) => theme.borderRadius.round};
   transition: all ${({ theme }) => theme.transitions.fast};
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: transparent;
 
   &:hover {
-    color: ${({ theme }) => theme.colors.text};
+    color: ${({ theme }) => theme.colors.primary};
     background-color: ${({ theme }) => theme.colors.background};
+    transform: scale(1.05);
+  }
+
+  &:active {
+    transform: scale(0.95);
   }
 `;
 
 const UnreadBadge = styled.div`
-  background-color: ${({ theme }) => theme.colors.primary};
+  background: linear-gradient(135deg, 
+    ${({ theme }) => theme.colors.primary} 0%,
+    ${({ theme }) => theme.colors.primaryDark} 100%);
   color: white;
   font-size: 0.75rem;
   padding: 0.25rem 0.5rem;
-  border-radius: ${({ theme }) => theme.borderRadius.round};
-  min-width: 1.5rem;
-  height: 1.5rem;
+  border-radius: ${({ theme }) => theme.borderRadius.xl};
+  min-width: 20px;
+  height: 20px;
   display: flex;
   align-items: center;
   justify-content: center;
+  margin-left: auto;
+  box-shadow: ${({ theme }) => theme.shadows.small};
 `;
 
 const SelectionInfo = styled.div`
@@ -1138,6 +1525,56 @@ const RejectButton = styled(IconButton)`
 
   &:hover {
     background-color: ${({ theme }) => theme.colors.error}dd;
+  }
+`;
+
+const ShortcutWrapper = styled.div`
+  position: relative;
+`;
+
+const ShortcutButton = styled(EmojiButton)`
+  svg {
+    transform: rotate(-45deg);
+  }
+`;
+
+const ShortcutMenu = styled.div`
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  margin-bottom: 10px;
+  background-color: ${({ theme }) => theme.colors.surface};
+  border-radius: ${({ theme }) => theme.borderRadius.medium};
+  box-shadow: ${({ theme }) => theme.shadows.large};
+  min-width: 200px;
+  overflow: hidden;
+  z-index: 1000;
+
+  &::before {
+    content: '';
+    position: absolute;
+    bottom: -8px;
+    left: 15px;
+    border-left: 8px solid transparent;
+    border-right: 8px solid transparent;
+    border-top: 8px solid ${({ theme }) => theme.colors.surface};
+  }
+`;
+
+const ShortcutItem = styled.button`
+  width: 100%;
+  padding: 0.75rem 1rem;
+  text-align: left;
+  color: ${({ theme }) => theme.colors.text};
+  transition: all ${({ theme }) => theme.transitions.fast};
+  border-bottom: 1px solid ${({ theme }) => theme.colors.border};
+
+  &:hover {
+    background-color: ${({ theme }) => theme.colors.background};
+  }
+
+  &:last-child {
+    border-bottom: none;
   }
 `;
 
