@@ -920,13 +920,14 @@ const Sidebar = styled.div`
 `;
 
 const SidebarHeader = styled.div`
-  padding: 1.25rem;
+ padding: 1.25rem; // Ensure consistent padding
   border-bottom: 1px solid ${({ theme }) => theme.colors.border};
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: center; // Align items vertically
   background-color: ${({ theme }) => theme.colors.surface};
   box-shadow: ${({ theme }) => theme.shadows.small};
+  height: 80px;
 `;
 
 const Username = styled.h2`
@@ -1068,14 +1069,14 @@ const ChatArea = styled.div`
 `;
 
 const ChatHeader = styled.div`
-  padding: 1rem 1.5rem;
-  border-bottom: 1px solid ${({ theme }) => `${theme.colors.border}80`};
+  padding: 1.25rem; // Ensure consistent padding
+  border-bottom: 1px solid ${({ theme }) => theme.colors.border};
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  background-color: ${({ theme }) => `${theme.colors.surface}CC`};
-  backdrop-filter: blur(8px);
-  z-index: 2;
+  align-items: center; // Align items vertically
+  background-color: ${({ theme }) => theme.colors.surface};
+  box-shadow: ${({ theme }) => theme.shadows.small};
+  height: 80px;
 `;
 
 const IconButton = styled.button`
